@@ -303,6 +303,43 @@ npm run mirror         # hands-on device control (NEVER during a run)
 npm run verify         # typecheck + lint
 ```
 
+### Reports
+
+Every run writes two things to `appium-reports/`:
+
+| File | For | Rule |
+|---|---|---|
+| `junit.xml` | `tools/gate.mjs` | **never remove or rename** — the gate parses it to decide whether stage 7 passed |
+| `report.html` | humans | self-contained; failure screenshots embedded as base64 |
+| `steps.jsonl` | `report.html` | per-step timings, appended by `StepRecorder` during the run |
+
+`report.html` comes from **`tools/html-reporter.mjs`** — this project's own
+reporter, committed so every clone produces the identical report with no
+install step. Customise the report by editing that file.
+
+Every test row opens to **Steps → What went wrong → Full error & stack trace →
+Media**, each colour-coded so they are distinguishable at a glance.
+
+**Per-step timings come from `src/support/StepRecorder.ts`, not from Jest.**
+Jest hands a reporter only a total duration per test, so `BasePage` actions
+wrap themselves in `StepRecorder.step()` and the timings are appended to
+`appium-reports/steps.jsonl`. It always re-throws, and a recording failure is
+swallowed — instrumentation must never fail a test.
+
+**The plain-language diagnosis never replaces the raw error.** It classifies
+known failure shapes only; an unrecognised error gets no explanation rather
+than a wrong one, and the full trace is always one click away.
+
+**`slug()` in `tools/html-reporter.mjs` must stay identical to `slug()` in
+`jest.setup.ts`.** The setup file names artefacts `<stamp>__<slug>.png`; the
+reporter pairs them to tests by that slug. Change one and screenshots silently
+stop appearing — the report still builds, just without images. The same applies
+to the test name `StepRecorder` records: it pairs steps by `fullName`, so a
+change there silently empties the Steps section.
+
+**A reporting failure must never fail a run.** The reporter wraps its write and
+warns; the tests already ran and `junit.xml` is what the gate reads.
+
 **The mirror is read-only during a run.** A human click races Appium for the
 same screen and reddens a passing test. `npm run mirror` is for hands-on work
 between runs.

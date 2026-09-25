@@ -47,6 +47,9 @@ async function capture(testName: string) {
   // prevent the page source, and neither must ever mask the real test failure.
   try {
     const png = await driver.takeScreenshot();
+    // tools/html-reporter.mjs reads this directory after the run and embeds
+    // the image in report.html, pairing it to the test by the slugged name.
+    // Keep that slug() in step with this one or artefacts stop pairing.
     writeFileSync(`${base}.png`, Buffer.from(png, 'base64'));
   } catch (e) {
     console.warn(`[setup] screenshot failed: ${(e as Error).message}`);
@@ -82,6 +85,24 @@ function wrap(original: jest.It): jest.It {
   // Preserve .each / .only / .skip / .todo / .failing.
   return Object.assign(wrapped, original);
 }
+
+/**
+ * Tell StepRecorder which test is running, so the steps it records pair back
+ * to the right test in the report. WITHOUT THIS every step is written with an
+ * empty test name and the report's Steps section is silently empty — verified
+ * against a fresh clone.
+ */
+beforeEach(() => {
+  try {
+    // Required lazily: a project that has not scaffolded StepRecorder yet
+    // must still run.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { StepRecorder } = require('./src/support/StepRecorder');
+    StepRecorder.setTest(expect.getState().currentTestName ?? '');
+  } catch {
+    /* recorder absent — steps simply are not recorded */
+  }
+});
 
 global.it = wrap(global.it);
 global.test = wrap(global.test);

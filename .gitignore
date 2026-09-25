@@ -9,3 +9,10 @@ tools/scrcpy-server
 .DS_Store
 *.tsbuildinfo
 .goal.json
+
+# Scratch/working plans (NOT module plans — gate.mjs needs plan/<module>.md
+# committed, or stage 9 fails for anyone who clones this repo)
+plan/*.plan.txt
+
+# Report design mockup — reference only, not used at runtime
+Appium HTML Report design/

@@ -390,8 +390,69 @@ rejects the misspelling with `TS2561`), and a `jest-junit` reporter writing to
 `appium-reports/`.
 
 ```bash
+cp .claude/skills/qa-appium-scripter/templates/jest.config.ts .
 cp .claude/skills/qa-appium-scripter/templates/jest.setup.ts .
+mkdir -p tools && cp .claude/skills/qa-appium-scripter/templates/html-reporter.mjs tools/
+cp .claude/skills/qa-appium-scripter/templates/StepRecorder.ts src/support/
 ```
+
+**Two reporters, and they are not interchangeable.** `jest-junit` writes
+`appium-reports/junit.xml` — **`tools/gate.mjs` parses it** to decide whether
+stage 7 passed, so it is never removed and its path never changes without
+updating the gate. `tools/html-reporter.mjs` is this project's own, purely
+human-facing: it writes ONE self-contained `appium-reports/report.html` with
+each failure's screenshot **base64-embedded**, so the file can be attached to a
+ticket and still render.
+
+It is in-repo rather than an npm package on purpose: it is committed, so every
+clone produces the identical report with no install step and no version drift.
+Customise the report by editing that file.
+
+The report is a dashboard generated from real run data: five KPI cards, a
+per-test duration chart, a pass-ratio donut, a filter toolbar (search + status
+pills + expand-all), and tests grouped by describe block. Every test row opens
+to four colour-coded sections, in this order:
+
+| Section | Colour | Holds |
+|---|---|---|
+| Steps | violet | each recorded step with its own millisecond timing and bar |
+| What went wrong | cyan | a plain-language diagnosis + the concrete next step |
+| Full error & stack trace | red | the raw trace, your frames highlighted |
+| Media & attachments | amber | the device screenshot at failure |
+
+**Per-step timings need `StepRecorder`.** Jest gives a reporter only a TOTAL
+duration per test — verified against the API, there is no step breakdown to
+read. So `src/support/StepRecorder.ts` times each call and appends a line to
+`appium-reports/steps.jsonl`, which the reporter reads back. `BasePage` actions
+wrap themselves in it, so every page object produces steps for free:
+
+```typescript
+async tap(el: WebdriverIO.Element, description: string) {
+  return StepRecorder.step(`tap ${description}`, async () => { /* … */ });
+}
+```
+
+It **always re-throws** — swallowing there would hide a real defect — and a
+recording failure is silently ignored, because instrumentation must never fail
+a test.
+
+**The diagnosis is a classifier, not a guess.** Each rule matches a failure
+shape this stack actually produces (`waitForText` timeout, `element wasn't
+found`, stale element, `UiAutomation not connected`, trust-anchor/TLS,
+ECONNREFUSED, Jest timeout, assertion diff). **An unrecognised error gets NO
+explanation** rather than a plausible-sounding wrong one — a confident
+misdiagnosis costs more than none. The raw trace is always one click away, so
+the explainer never replaces evidence.
+
+**It uses NO CDN.** The mockup was built on Tailwind + Font Awesome + Google
+Fonts; none of that survives into the reporter. A report that needs the network
+renders unstyled offline, on a locked-down network and in some attachment
+viewers — which defeats attaching it to a ticket. All CSS is inline, icons are
+inline SVG, fonts fall back to the system stack. ~15 KB, zero network calls.
+
+`jest-html-reporters` was evaluated and rejected — no template override, and
+its `inlineSource` inlines JS/CSS but leaves screenshots as external files, so
+its 1.5 MB report.html still loses its images when moved. Verified both ways.
 
 **Failure capture is standing infrastructure, not a nicety.** On a real device
 you cannot see the screen when a test failed and the stack trace rarely says;
