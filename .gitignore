@@ -1,0 +1,11 @@
+node_modules/
+.env
+appium-reports/
+*.apk
+*.aab
+*.ipa
+tools/scrcpy
+tools/scrcpy-server
+.DS_Store
+*.tsbuildinfo
+.goal.json

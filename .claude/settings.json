@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "Edit(/.claude/skills/qa-appium-scripter/**)",
+      "Bash(node tools/gate.mjs:*)",
+      "Bash(mkdir -p *)",
+      "Bash(sed -n '/^### Step 1 — System toolchain/,/^### Step 2/p' SKILL.md | head -70)",
+      "Bash(sed -n '/^### Step 10b/,/^### Step 10c/p' SKILL.md)",
+      "Bash(grep -n \"Step 10\" SKILL.md; echo \"--- around step 10 ---\"; sed -n '/^### Step 10 — npm scripts/,/^### Step 11 /p' SKILL.md | head -40)"
+    ],
+    "additionalDirectories": [
+      "/Users/foyez/Documents/Appium-Scripter/.claude/skills/qa-appium-scripter"
+    ]
+  },
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node tools/stop-gate.mjs"
+          }
+        ]
+      }
+    ]
+  }
+}

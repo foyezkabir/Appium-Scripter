@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "appium": {
+      "type": "stdio",
+      "command": "appium-mcp",
+      "args": [],
+      "env": {
+        "JAVA_HOME": "/opt/homebrew/opt/openjdk@17",
+        "ANDROID_HOME": "/Users/foyez/Library/Android/sdk"
+      }
+    }
+  }
+}
