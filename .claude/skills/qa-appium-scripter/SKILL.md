@@ -389,8 +389,136 @@ The four invariants are non-negotiable — see
 rejects the misspelling with `TS2561`), and a `jest-junit` reporter writing to
 `appium-reports/`.
 
-Nothing else belongs in it. No `jest.retryTimes` — see the flake policy; a test
-that passes on rerun with no code change is a defect in the test.
+Create `jest.config.ts`:
+
+```typescript
+/**
+ * jest.config.ts — committed, so every clone runs with the same reporters.
+ */
+
+export default {
+  preset: 'ts-jest',
+  testEnvironment: 'node',
+
+  // ── Invariants. See the skill's "Jest configuration invariants". ────────
+  maxWorkers: 1,        // one physical device
+  bail: 0,              // one run must surface EVERY failure
+  testTimeout: 240_000, // every command is an HTTP round trip + a bridge call
+  // NO jest.retryTimes — see the flake policy. A test that passes on rerun
+  // with no code change is a defect in the test.
+
+  setupFilesAfterEnv: ['<rootDir>/jest.setup.ts'],
+
+  reporters: [
+    'default',
+
+    // Machine-readable. tools/gate.mjs PARSES THIS to decide whether stage 7
+    // passed — never remove it, and never change outputDirectory/outputName
+    // without updating the gate.
+    ['jest-junit', {
+      outputDirectory: 'appium-reports',
+      outputName: 'junit.xml',
+      classNameTemplate: '{classname}',
+      titleTemplate: '{title}',
+    }],
+  ],
+};
+```
+
+Create `jest.setup.ts`. The three comments marked load-bearing below each mark
+a failure already paid for — keep them:
+
+```typescript
+/**
+ * jest.setup.ts — standing infrastructure, loaded via setupFilesAfterEnv.
+ *
+ * On a physical device you cannot see what the screen looked like when a test
+ * failed, and the stack trace rarely says. This captures a screenshot plus the
+ * page source at the moment of failure, named after the test, into
+ * appium-reports/failures/.
+ *
+ * It wraps the global `it`/`test` rather than using an afterEach, because an
+ * afterEach runs AFTER teardown has already navigated away — by then the
+ * screen no longer shows the failure.
+ */
+
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+
+const OUT = join('appium-reports', 'failures');
+
+/** Filesystem-safe name from a test title. */
+const slug = (s: string) =>
+  s.replace(/[^\w.-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 120);
+
+/** Only what this file needs — NOT ReturnType<typeof d>: if d()'s signature
+ *  is `never` (it throws when there is no session) that collapses to `never`
+ *  and every property access below becomes a compile error, failing the whole
+ *  suite before a single test runs. */
+type Capturable = {
+  takeScreenshot(): Promise<string>;
+  getPageSource(): Promise<string>;
+};
+
+async function capture(testName: string) {
+  // Imported lazily: at module load the driver does not exist yet.
+  let driver: Capturable;
+  try {
+    const { d } = await import('./src/support/driver');
+    driver = d() as unknown as Capturable;
+  } catch {
+    return; // no live session — nothing to capture, and that is not an error
+  }
+
+  mkdirSync(OUT, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const base = join(OUT, `${stamp}__${slug(testName)}`);
+
+  // Each capture is independent: a failure to grab the screenshot must not
+  // prevent the page source, and neither must ever mask the real test failure.
+  try {
+    const png = await driver.takeScreenshot();
+    writeFileSync(`${base}.png`, Buffer.from(png, 'base64'));
+  } catch (e) {
+    console.warn(`[setup] screenshot failed: ${(e as Error).message}`);
+  }
+
+  try {
+    writeFileSync(`${base}.xml`, await driver.getPageSource());
+  } catch (e) {
+    console.warn(`[setup] page source failed: ${(e as Error).message}`);
+  }
+}
+
+/**
+ * Wrap the global test fn so a throwing body is captured, then RE-THROWN.
+ * Swallowing here would turn every failure green — the exact thing violation
+ * #3 exists to prevent.
+ */
+function wrap(original: jest.It): jest.It {
+  const wrapped = ((name: string, fn?: jest.ProvidesCallback, timeout?: number) => {
+    if (!fn) return original(name, fn as never, timeout);
+    const inner = async (...args: unknown[]) => {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        return await (fn as any)(...args);
+      } catch (err) {
+        await capture(name);
+        throw err; // ALWAYS re-throw
+      }
+    };
+    return original(name, inner as jest.ProvidesCallback, timeout);
+  }) as jest.It;
+
+  // Preserve .each / .only / .skip / .todo / .failing.
+  return Object.assign(wrapped, original);
+}
+
+global.it = wrap(global.it);
+global.test = wrap(global.test);
+
+export {};
+```
 
 **`jest-junit` is not optional.** It writes `appium-reports/junit.xml`, and
 **`tools/gate.mjs` parses it** to decide whether stage 7 passed — so it is
@@ -469,8 +597,151 @@ wonder what belongs there.
 
 ### Step 5a — Helpers (both, always)
 
-`src/data/DataHelper.ts` and `src/support/ErrorHelper.ts`. Two files, each
-existing because its absence has already caused a defect.
+Create both, verbatim — `src/data/DataHelper.ts` and `src/support/ErrorHelper.ts`.
+Each exists because its absence has already caused a defect.
+
+```typescript
+// src/data/DataHelper.ts
+import { faker } from '@faker-js/faker';
+
+/**
+ * Test data that is REALISTIC and UNIQUE at the same time.
+ *
+ * WHEN TO USE THIS, AND WHEN NOT TO:
+ *
+ *   FIXED literal — the value is the app's own vocabulary and the test asserts
+ *   AGAINST it: blood groups, column headings, consultation types, expected
+ *   copy, a deliberately malformed string whose exact shape is the point.
+ *   Generating these would be nonsense.
+ *
+ *   GENERATED (here) — the value is INPUT the app will store, validate or show
+ *   back: a name typed into a form, an email that must not match any account, a
+ *   password that must never authenticate.
+ *
+ *   ENV VAR — the value must be a real account or a real phone the team owns.
+ *   A generated Bangladeshi number is a STRANGER'S real phone.
+ *
+ * Why generated beats a literal for the second category, on a PRODUCTION target:
+ * a hardcoded "not.a.real.user@..." can be registered by someone one day, and
+ * the test that asserted "unknown account is rejected" then silently asserts
+ * nothing. Same for a hardcoded wrong password.
+ */
+export class DataHelper {
+  /** A value no earlier run will reproduce. Time part keeps it ordered and
+   *  readable; random part survives two calls in the same millisecond. */
+  static uid(): string {
+    return `${Date.now().toString(36)}-${faker.string.alphanumeric(6)}`;
+  }
+
+  /** Shorter suffix for appending to human-readable text. */
+  static tag(): string {
+    return `${Date.now().toString(36).slice(-4)}${faker.string.alphanumeric(4)}`;
+  }
+
+  /** A real-looking person name: "Ewald Walter 04e0sedj". Realistic matters —
+   *  it exercises the same validation and layout a real name does. */
+  static personName(): string {
+    return `${faker.person.fullName()} ${DataHelper.tag()}`;
+  }
+
+  /** A deliverable-looking but unique address. Defaults to a reserved TLD that
+   *  can never be a real inbox. */
+  static email(domain = 'example.test'): string {
+    let local = faker.internet.username().toLowerCase().replace(/[^a-z0-9.]/g, '');
+    return `qa.${local}.${DataHelper.tag()}@${domain}`;
+  }
+
+  /** A numeric reference / registration / OTP of a given length. */
+  static numericId(length = 10): string {
+    return faker.string.numeric(length);
+  }
+
+  /** A local-format mobile number. NEVER use this where an SMS is actually
+   *  sent — the number belongs to a real person. */
+  static phone(prefix = '01', operators = ['3', '4', '5', '6', '7', '8', '9'], digits = 8): string {
+    return `${prefix}${faker.helpers.arrayElement(operators)}${faker.string.numeric(digits)}`;
+  }
+
+  /** A display name that is obviously test data, for rows a human will see.
+   *  QA-AUTO = made through the UI, QA-SEED = seeded through the API. */
+  static unique(label: string, prefix = 'QA-AUTO'): string {
+    return `${prefix} ${label} ${DataHelper.uid()}`;
+  }
+}
+```
+
+```typescript
+// src/support/ErrorHelper.ts
+/**
+ * Error handling lives here, because a try/catch in a spec silently swallows the
+ * failure it was supposed to report (zero tolerance #3).
+ *
+ * The honest use is TEARDOWN: cleanup runs after the assertions have already
+ * passed, so a cleanup error must warn rather than turn a correct result red.
+ * Never use this to make a flaky assertion pass.
+ *
+ * `eachWarnOnFailure` exists because of a real bug: clearAllUpcoming() wrapped a
+ * whole loop in one try/catch, so the FIRST uncancellable appointment aborted
+ * the rest and the suite believed the list was empty. Per-item isolation makes
+ * that shape impossible.
+ */
+export class ErrorHelper {
+  /** Runs an action and never throws. Logs the reason so a swallowed error is
+   *  still visible. */
+  static async warnOnFailure(action: () => Promise<void>, description: string): Promise<void> {
+    try {
+      await action();
+    } catch (error) {
+      console.warn(`[teardown] ${description} — failed, continuing: ${reasonFor(error)}`);
+    }
+  }
+
+  /**
+   * Runs `action` for every item, isolating each one, and returns the items that
+   * failed. One failure never stops the rest.
+   */
+  static async eachWarnOnFailure<T>(
+    items: readonly T[],
+    action: (item: T) => Promise<void>,
+    describe: (item: T) => string,
+  ): Promise<T[]> {
+    let failed: T[] = [];
+    for (let item of items) {
+      try {
+        await action(item);
+      } catch (error) {
+        failed.push(item);
+        console.warn(`[teardown] ${describe(item)} — failed, continuing: ${reasonFor(error)}`);
+      }
+    }
+    return failed;
+  }
+
+  /** Tries the primary action, falls back to a second one. For the teardown
+   *  ladder, where a lower rung exists. */
+  static async tryOrElse(primary: () => Promise<void>, fallback: () => Promise<void>): Promise<void> {
+    try {
+      await primary();
+    } catch {
+      await fallback();
+    }
+  }
+
+  /** Whether an action succeeded, without throwing either way. */
+  static async succeeded(action: () => Promise<void>): Promise<boolean> {
+    try {
+      await action();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
+
+function reasonFor(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+```
 
 **`src/data/DataHelper.ts`** — realistic + unique test data. The split it
 enforces:
@@ -632,8 +903,8 @@ through `with-mirror.sh` like the others.
 
 ### Step 10b — `tools/with-mirror.sh`
 
-Write it verbatim, then `chmod +x tools/with-mirror.sh`. Every comment in it
-marks something that has already gone wrong once:
+Create `tools/with-mirror.sh`, then `chmod +x` it. Every comment in it marks
+something that has already gone wrong once — keep them:
 
 ```bash
 #!/usr/bin/env bash
@@ -719,7 +990,7 @@ runs unmirrored; start QuickTime by hand if you want to watch.
 
 ### Step 10c — `tools/preflight.sh`
 
-Write it verbatim, then `chmod +x tools/preflight.sh`:
+Create `tools/preflight.sh`, then `chmod +x` it:
 
 ```bash
 #!/usr/bin/env bash
@@ -802,8 +1073,8 @@ a `driver.pause()` all compile perfectly.
 npm install --save-dev eslint@9 typescript-eslint@8
 ```
 
-`eslint.config.mjs` — verbatim. Every selector encodes one rule, so paraphrasing
-it silently drops enforcement:
+Create `eslint.config.mjs`. Every selector encodes one rule, so paraphrasing it
+silently drops enforcement — write it verbatim:
 
 ```javascript
 import tseslint from 'typescript-eslint';
