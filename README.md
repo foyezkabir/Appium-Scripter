@@ -28,8 +28,7 @@ It does not stop between stages to ask whether it should continue.
 
 | File | What it is |
 |---|---|
-| `.claude/skills/qa-appium-scripter/SKILL.md` | the method — ~2000 lines, the authority |
-| `.claude/skills/qa-appium-scripter/templates/` | files the bootstrap copies verbatim |
+| `.claude/skills/qa-appium-scripter/SKILL.md` | the method — one self-contained file, the authority |
 | `CLAUDE.md` | the rules, always loaded, skill or no skill |
 | `tools/gate.mjs` | verifies a module is actually finished |
 | `tools/stop-gate.mjs` | Stop hook — blocks ending a turn mid-module |

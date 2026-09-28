@@ -389,10 +389,8 @@ The four invariants are non-negotiable — see
 rejects the misspelling with `TS2561`), and a `jest-junit` reporter writing to
 `appium-reports/`.
 
-```bash
-cp .claude/skills/qa-appium-scripter/templates/jest.config.ts .
-cp .claude/skills/qa-appium-scripter/templates/jest.setup.ts .
-```
+Nothing else belongs in it. No `jest.retryTimes` — see the flake policy; a test
+that passes on rerun with no code change is a defect in the test.
 
 **`jest-junit` is not optional.** It writes `appium-reports/junit.xml`, and
 **`tools/gate.mjs` parses it** to decide whether stage 7 passed — so it is
@@ -471,12 +469,8 @@ wonder what belongs there.
 
 ### Step 5a — Helpers (both, always)
 
-```bash
-cp .claude/skills/qa-appium-scripter/templates/DataHelper.ts src/data/
-cp .claude/skills/qa-appium-scripter/templates/ErrorHelper.ts src/support/
-```
-
-Two files, each existing because its absence has already caused a defect.
+`src/data/DataHelper.ts` and `src/support/ErrorHelper.ts`. Two files, each
+existing because its absence has already caused a defect.
 
 **`src/data/DataHelper.ts`** — realistic + unique test data. The split it
 enforces:
@@ -638,8 +632,64 @@ through `with-mirror.sh` like the others.
 
 ### Step 10b — `tools/with-mirror.sh`
 
+Write it verbatim, then `chmod +x tools/with-mirror.sh`. Every comment in it
+marks something that has already gone wrong once:
+
 ```bash
-cp .claude/skills/qa-appium-scripter/templates/with-mirror.sh tools/ && chmod +x tools/with-mirror.sh
+#!/usr/bin/env bash
+# Run a jest command with a read-only scrcpy mirror alongside it.
+# The mirror is OBSERVATION ONLY: --no-control, so a stray click cannot
+# race the automation. Use `npm run mirror` when you want to drive by hand.
+set -uo pipefail
+
+SELF=$$          # capture here: inside a subshell, $$ still resolves to us
+MIRROR_PID=""
+# Never fail a run because the mirror could not start: no scrcpy, no display
+# (CI), or no device yet. The tests are the deliverable; the window is not.
+if command -v scrcpy >/dev/null 2>&1; then
+  # shellcheck disable=SC2086  # APPIUM_UDID is deliberately unquoted-if-empty
+  # NO --stay-awake HERE: scrcpy refuses to start with
+  #   "ERROR: Cannot request to stay awake if control is disabled"
+  # because --stay-awake needs control, and --no-control is the half we cannot
+  # give up (a human click races Appium and reddens a passing test).
+  # Errors go to a LOG, never /dev/null — silenced, the mirror failed invisibly
+  # on every run: tests passed, no window appeared, nothing said why.
+  mkdir -p appium-reports
+  scrcpy --no-control \
+         --window-title "Appium — RUNNING (read-only)" \
+         ${APPIUM_UDID:+-s "$APPIUM_UDID"} >appium-reports/scrcpy.log 2>&1 &
+  MIRROR_PID=$!
+  # Watchdog. Traps alone are NOT enough: a Ctrl-C or a `kill -9` on this
+  # script never runs them, and the mirror then outlives the run as a window
+  # stuck over the device. This poll notices the script is gone by any means
+  # and reaps the mirror. Verified against SIGTERM, SIGINT and SIGKILL.
+  ( while kill -0 "$SELF" 2>/dev/null; do sleep 0.3; done
+    kill "$MIRROR_PID" 2>/dev/null ) >/dev/null 2>&1 &
+  WATCHDOG_PID=$!
+else
+  WATCHDOG_PID=""
+  echo "note: scrcpy not found — running without a mirror." >&2
+fi
+
+# Reap the mirror and its watchdog on a normal exit and on a caught signal.
+cleanup() {
+  [ -n "$MIRROR_PID" ]   && kill "$MIRROR_PID"   2>/dev/null
+  [ -n "$WATCHDOG_PID" ] && kill "$WATCHDOG_PID" 2>/dev/null
+  MIRROR_PID=""; WATCHDOG_PID=""
+}
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
+trap cleanup EXIT
+
+# Run jest in the BACKGROUND and `wait` on it: bash defers a trap until a
+# FOREGROUND child returns, so with jest in front the cleanup would not run
+# until the whole suite finished — too late to matter on a Ctrl-C.
+node --experimental-vm-modules node_modules/.bin/jest "${@:2}" &
+JEST_PID=$!
+wait "$JEST_PID"
+STATUS=$?
+cleanup
+exit "$STATUS"
 ```
 
 **Every test run mirrors the device, read-only.** You are driving a phone you
@@ -669,8 +719,50 @@ runs unmirrored; start QuickTime by hand if you want to watch.
 
 ### Step 10c — `tools/preflight.sh`
 
+Write it verbatim, then `chmod +x tools/preflight.sh`:
+
 ```bash
-cp .claude/skills/qa-appium-scripter/templates/preflight.sh tools/ && chmod +x tools/preflight.sh
+#!/usr/bin/env bash
+# Device + server preflight. Branches on APPIUM_PLATFORM from .env.
+set -uo pipefail
+[ -f .env ] && set -a && . ./.env && set +a
+PLATFORM="${APPIUM_PLATFORM:-}"
+FAIL=0
+
+case "$PLATFORM" in
+  android)
+    echo "── [Android] devices ──"
+    adb devices -l | sed '1d' | grep -q . \
+      && adb devices -l | sed '1d' \
+      || { echo "FAIL: no device. Replug USB, unlock, accept the debugging prompt ON THE PHONE."; FAIL=1; }
+    adb devices | grep -q unauthorized \
+      && { echo "FAIL: unauthorized — accept the RSA prompt on the device."; FAIL=1; }
+    ;;
+  ios)
+    echo "── [iOS] devices ──"
+    if ! xcrun simctl help >/dev/null 2>&1; then
+      echo "FAIL: full Xcode required (Command Line Tools alone cannot enumerate devices)."
+      echo "      Install Xcode, then: sudo xcode-select -s /Applications/Xcode.app"
+      FAIL=1
+    fi
+    command -v idevice_id >/dev/null 2>&1 \
+      && { idevice_id -l | grep -q . || { echo "FAIL: no iOS device (trust this computer on the phone?)"; FAIL=1; }; } \
+      || echo "note: libimobiledevice not installed — cannot list real devices."
+    ;;
+  *)
+    echo "FAIL: APPIUM_PLATFORM must be 'android' or 'ios' (got '${PLATFORM:-<empty>}')."
+    echo "      Run Phase −1 and fill it in .env."
+    FAIL=1
+    ;;
+esac
+
+echo "── Appium server ──"
+curl -sf "http://${APPIUM_HOST:-127.0.0.1}:${APPIUM_PORT:-4723}/status" >/dev/null \
+  && echo "server OK" \
+  || { echo "FAIL: server not answering. Start it: npm run appium"; FAIL=1; }
+
+[ "$FAIL" -eq 0 ] && echo "PREFLIGHT GREEN" || echo "PREFLIGHT RED"
+exit "$FAIL"
 ```
 
 Branches on `APPIUM_PLATFORM`: **[Android]** device attached + authorised,
@@ -708,7 +800,100 @@ a `driver.pause()` all compile perfectly.
 
 ```bash
 npm install --save-dev eslint@9 typescript-eslint@8
-cp .claude/skills/qa-appium-scripter/templates/eslint.config.mjs .
+```
+
+`eslint.config.mjs` — verbatim. Every selector encodes one rule, so paraphrasing
+it silently drops enforcement:
+
+```javascript
+import tseslint from 'typescript-eslint';
+
+export default tseslint.config(
+  { ignores: ['node_modules/**', 'crawl/**', 'appium-reports/**', 'tools/**'] },
+
+  // Parser ONLY — no rule presets. This block is REQUIRED: we deliberately
+  // skip tseslint.configs.recommended (see the note below), and without a
+  // parser ESLint reads .ts as JavaScript and dies on the first type
+  // annotation with "Parsing error: Unexpected token :" — while silently
+  // catching none of the violations. Verified: removing it drops the gate to
+  // zero rules fired.
+  {
+    files: ['**/*.ts'],
+    languageOptions: { parser: tseslint.parser },
+  },
+
+  // ── TIER 4: specs are DETERMINISTIC ────────────────────────────────────
+  {
+    files: ['tests/**/*.spec.ts'],
+    rules: {
+      'no-restricted-syntax': ['error',
+        { selector: 'ForStatement',   message: 'Violation #1: no loops in specs. Move the loop into a page object, or split into separate tests.' },
+        { selector: 'ForOfStatement', message: 'Violation #1: no loops in specs. Move the loop into a page object, or split into separate tests.' },
+        { selector: 'ForInStatement', message: 'Violation #1: no loops in specs.' },
+        { selector: 'WhileStatement', message: 'Violation #1: no loops in specs.' },
+        { selector: 'IfStatement',    message: 'Violation #2: no if/else in specs. Seed the precondition so exactly one path is correct.' },
+        { selector: 'ConditionalExpression', message: 'Violation #2: no conditionals in specs.' },
+        { selector: 'TryStatement',   message: 'Violation #3: no try/catch in specs. Let errors surface.' },
+        { selector: "CallExpression[callee.property.name='catch']", message: 'Violation #3: no silent .catch() in specs — the test can never fail.' },
+        // [declare!=true] exempts `declare const`, which is a type-only
+        // ambient and never re-evaluated. Without it the rule false-positives.
+        { selector: "Program > VariableDeclaration[kind='const'][declare!=true]", message: 'Violation #6: use let, never const, at spec top scope — the script is evaluated more than once per run.' },
+        { selector: "CallExpression[callee.property.name='retryTimes']", message: 'Flake policy: jest.retryTimes is banned. A test that passes on rerun is a defect in the test — fix the cause.' },
+        { selector: "CallExpression[callee.property.name='performActions']", message: 'Violation #4: no coordinate swipes. Drive the scroll container: scrollToText / scrollFieldIntoReach.' },
+        { selector: "CallExpression[callee.property.name='touchAction']", message: 'Violation #4: no coordinate swipes. Drive the scroll container instead.' },
+      ],
+    },
+  },
+
+  // ── Violation #4: no coordinate swipes in page objects either ─────────
+  {
+    files: ['src/pages/**/*.ts'],
+    rules: {
+      'no-restricted-syntax': ['error',
+        { selector: "CallExpression[callee.property.name='performActions']", message: 'Violation #4: no coordinate swipes. A swipe starting low enough to scroll begins ON the bottom nav and is delivered as a TAB TAP — it destroys a half-filled form.' },
+        { selector: "CallExpression[callee.property.name='touchAction']", message: 'Violation #4: no coordinate swipes. Drive the scroll container instead.' },
+      ],
+    },
+  },
+
+  // ── Explicit waits only, suite-wide ────────────────────────────────────
+  {
+    files: ['src/**/*.ts', 'tests/**/*.ts'],
+    rules: {
+      'no-restricted-properties': ['error',
+        { object: 'driver', property: 'pause', message: 'Explicit waits only: waitVisible / waitGone / waitForText, or driver.waitUntil with a timeoutMsg naming what failed.' },
+      ],
+      'no-restricted-globals': ['error',
+        { name: 'setTimeout', message: 'Never sleep as a wait. Wait on a condition.' },
+      ],
+    },
+  },
+
+  // ── Violation #7: support/ and api/ build state, they never assert ─────
+  {
+    files: ['src/support/**/*.ts', 'src/api/**/*.ts'],
+    rules: {
+      'no-restricted-globals': ['error',
+        { name: 'expect', message: 'Violation #7: no assertions in support/ or api/. A failing precondition is a broken setup, not a test result.' },
+      ],
+      'no-restricted-syntax': ['error',
+        { selector: "CallExpression[callee.name='expect']", message: 'Violation #7: no assertions in support/ or api/. A failing precondition is a broken setup, not a test result.' },
+      ],
+    },
+  },
+
+  // ── TIER 1: locator files hold STRINGS ONLY ────────────────────────────
+  {
+    files: ['src/locators/**/*.ts'],
+    rules: {
+      'no-restricted-syntax': ['error',
+        { selector: 'FunctionDeclaration',     message: 'Locator files hold strings only — no logic, no actions, no assertions.' },
+        { selector: 'ArrowFunctionExpression', message: 'Locator files hold strings only — no parameterised error helpers.' },
+        { selector: "CallExpression[callee.name='d']", message: 'Locator files must never touch the driver.' },
+      ],
+    },
+  },
+);
 ```
 
 Add `"lint": "eslint ."` and `"verify": "npm run typecheck && npm run lint"`.
