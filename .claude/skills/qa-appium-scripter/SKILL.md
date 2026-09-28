@@ -390,8 +390,14 @@ rejects the misspelling with `TS2561`), and a `jest-junit` reporter writing to
 `appium-reports/`.
 
 ```bash
+cp .claude/skills/qa-appium-scripter/templates/jest.config.ts .
 cp .claude/skills/qa-appium-scripter/templates/jest.setup.ts .
 ```
+
+**`jest-junit` is not optional.** It writes `appium-reports/junit.xml`, and
+**`tools/gate.mjs` parses it** to decide whether stage 7 passed — so it is
+never removed, and its `outputDirectory`/`outputName` never change without
+updating the gate.
 
 **Failure capture is standing infrastructure, not a nicety.** On a real device
 you cannot see the screen when a test failed and the stack trace rarely says;

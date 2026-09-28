@@ -303,6 +303,19 @@ npm run mirror         # hands-on device control (NEVER during a run)
 npm run verify         # typecheck + lint
 ```
 
+### Reports
+
+Every run writes to `appium-reports/`:
+
+| File | For | Rule |
+|---|---|---|
+| `junit.xml` | `tools/gate.mjs` | **never remove or rename** — the gate parses it to decide whether stage 7 passed |
+| `failures/` | humans | screenshot + page source at the moment of failure, written by `jest.setup.ts` |
+
+**A reporting failure must never fail a run.** Anything that writes a report
+wraps its write and warns; the tests already ran and `junit.xml` is what the
+gate reads.
+
 **The mirror is read-only during a run.** A human click races Appium for the
 same screen and reddens a passing test. `npm run mirror` is for hands-on work
 between runs.
