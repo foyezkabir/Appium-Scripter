@@ -642,20 +642,58 @@ tests against state it believed it had cleared.
 
 ### Step 6 — Support layer
 
-`src/support/config.ts` and `src/support/driver.ts`, per
-[Support layer](#support-layer--not-a-tier). Both must exist before any page
-object: every page object calls `d()`.
+Both must exist before any page object: every page object calls `d()`. They are
+**implementations, not configs** — copy them VERBATIM:
 
-`config.ts` — dotenv from the **project root**, timeouts, and the
-required-not-defaulted guard. `driver.ts` — `startSession()` (clock check →
-capabilities → `activateApp` → **prove** the package is frontmost), `d()`,
+```bash
+cp .claude/templates/config.ts src/support/
+cp .claude/templates/driver.ts src/support/
+```
+
+**Never rewrite or re-derive either at scaffold time — the template IS the
+implementation.** A fix belongs in the template file so every later project
+gets it.
+
+`config.ts` — dotenv from the **project root**, the platform/framework switches
+every branch reads, timeouts, and the `required()` guard that throws on a
+missing environment or tenant value instead of defaulting. `driver.ts` —
+`startSession()` (release UiAutomation → clock check → per-platform
+capabilities → `activateApp` → **prove** the app is frontmost), `d()`,
 `endSession()`.
+
+**The foreground proof is per-platform on purpose.** `getCurrentPackage()` is
+Android-only and **throws** on iOS rather than degrading, so the iOS path uses
+`queryAppState(bundleId) === 4` instead.
+
+> **[iOS] capabilities are UNVERIFIED** — authored from the XCUITest docs, not
+> from a run, and marked as such in the file. Confirm them on a device before
+> trusting a green iOS suite, and delete the marker when you do.
 
 ### Step 7 — `BasePage`
 
-`src/pages/base.page.ts`, extended by every page object. It exists to enforce
-two rules mechanically: **locators re-query, never cache** and **explicit waits
-only**. It must provide:
+`src/pages/base.page.ts`, extended by every page object. An implementation, not
+a config — copy it VERBATIM:
+
+```bash
+cp .claude/templates/base.page.ts src/pages/
+```
+
+**Never rewrite or re-derive it at scaffold time — the template IS the
+implementation.** It is the single biggest source of false failures in this
+stack when it is wrong, which is exactly why it is not left to be re-invented
+per project.
+
+**Set `bottomNavAnchor` in your first page object** if the app has a floating
+bottom nav: it is the accessibility id `scrollFieldIntoReach()` measures the nav
+from. Left undefined the nudge no-ops rather than guessing, and
+`scrollFieldIntoReach()` quietly degrades to `scrollToText()` — which is the
+failure mode violation #5 exists to prevent, so set it.
+
+> **[iOS] paths are UNVERIFIED** — every one is marked `[iOS] UNVERIFIED` in
+> the file. The Android paths are measured on-device.
+
+It exists to enforce two rules mechanically: **locators re-query, never cache**
+and **explicit waits only**. It provides:
 
 | Group | Members |
 |---|---|
