@@ -500,7 +500,11 @@ function wrap(original: jest.It): jest.It {
     if (!fn) return original(name, fn as never, timeout);
     const inner = async (...args: unknown[]) => {
       try {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        // `any` is deliberate: fn's signature varies (done-callback vs async).
+        // NO eslint-disable here — the config loads the parser and no rule
+        // presets, so @typescript-eslint/no-explicit-any does not exist and a
+        // directive naming it makes ESLint itself error, reddening the gate on
+        // a clean scaffold. Verified in a cold sandbox.
         return await (fn as any)(...args);
       } catch (err) {
         await capture(name);
