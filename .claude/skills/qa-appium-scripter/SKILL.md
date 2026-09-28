@@ -597,151 +597,22 @@ wonder what belongs there.
 
 ### Step 5a — Helpers (both, always)
 
-Create both, verbatim — `src/data/DataHelper.ts` and `src/support/ErrorHelper.ts`.
-Each exists because its absence has already caused a defect.
+Both are **implementations, not configs** — copy them VERBATIM from the
+committed templates:
 
-```typescript
-// src/data/DataHelper.ts
-import { faker } from '@faker-js/faker';
-
-/**
- * Test data that is REALISTIC and UNIQUE at the same time.
- *
- * WHEN TO USE THIS, AND WHEN NOT TO:
- *
- *   FIXED literal — the value is the app's own vocabulary and the test asserts
- *   AGAINST it: blood groups, column headings, consultation types, expected
- *   copy, a deliberately malformed string whose exact shape is the point.
- *   Generating these would be nonsense.
- *
- *   GENERATED (here) — the value is INPUT the app will store, validate or show
- *   back: a name typed into a form, an email that must not match any account, a
- *   password that must never authenticate.
- *
- *   ENV VAR — the value must be a real account or a real phone the team owns.
- *   A generated Bangladeshi number is a STRANGER'S real phone.
- *
- * Why generated beats a literal for the second category, on a PRODUCTION target:
- * a hardcoded "not.a.real.user@..." can be registered by someone one day, and
- * the test that asserted "unknown account is rejected" then silently asserts
- * nothing. Same for a hardcoded wrong password.
- */
-export class DataHelper {
-  /** A value no earlier run will reproduce. Time part keeps it ordered and
-   *  readable; random part survives two calls in the same millisecond. */
-  static uid(): string {
-    return `${Date.now().toString(36)}-${faker.string.alphanumeric(6)}`;
-  }
-
-  /** Shorter suffix for appending to human-readable text. */
-  static tag(): string {
-    return `${Date.now().toString(36).slice(-4)}${faker.string.alphanumeric(4)}`;
-  }
-
-  /** A real-looking person name: "Ewald Walter 04e0sedj". Realistic matters —
-   *  it exercises the same validation and layout a real name does. */
-  static personName(): string {
-    return `${faker.person.fullName()} ${DataHelper.tag()}`;
-  }
-
-  /** A deliverable-looking but unique address. Defaults to a reserved TLD that
-   *  can never be a real inbox. */
-  static email(domain = 'example.test'): string {
-    let local = faker.internet.username().toLowerCase().replace(/[^a-z0-9.]/g, '');
-    return `qa.${local}.${DataHelper.tag()}@${domain}`;
-  }
-
-  /** A numeric reference / registration / OTP of a given length. */
-  static numericId(length = 10): string {
-    return faker.string.numeric(length);
-  }
-
-  /** A local-format mobile number. NEVER use this where an SMS is actually
-   *  sent — the number belongs to a real person. */
-  static phone(prefix = '01', operators = ['3', '4', '5', '6', '7', '8', '9'], digits = 8): string {
-    return `${prefix}${faker.helpers.arrayElement(operators)}${faker.string.numeric(digits)}`;
-  }
-
-  /** A display name that is obviously test data, for rows a human will see.
-   *  QA-AUTO = made through the UI, QA-SEED = seeded through the API. */
-  static unique(label: string, prefix = 'QA-AUTO'): string {
-    return `${prefix} ${label} ${DataHelper.uid()}`;
-  }
-}
+```bash
+cp .claude/templates/DataHelper.ts  src/data/
+cp .claude/templates/ErrorHelper.ts src/support/
 ```
 
-```typescript
-// src/support/ErrorHelper.ts
-/**
- * Error handling lives here, because a try/catch in a spec silently swallows the
- * failure it was supposed to report (zero tolerance #3).
- *
- * The honest use is TEARDOWN: cleanup runs after the assertions have already
- * passed, so a cleanup error must warn rather than turn a correct result red.
- * Never use this to make a flaky assertion pass.
- *
- * `eachWarnOnFailure` exists because of a real bug: clearAllUpcoming() wrapped a
- * whole loop in one try/catch, so the FIRST uncancellable appointment aborted
- * the rest and the suite believed the list was empty. Per-item isolation makes
- * that shape impossible.
- */
-export class ErrorHelper {
-  /** Runs an action and never throws. Logs the reason so a swallowed error is
-   *  still visible. */
-  static async warnOnFailure(action: () => Promise<void>, description: string): Promise<void> {
-    try {
-      await action();
-    } catch (error) {
-      console.warn(`[teardown] ${description} — failed, continuing: ${reasonFor(error)}`);
-    }
-  }
+If `.claude/templates/` is absent — the skill was invoked from a project that
+has not had `.claude/` copied into it — take them from the global install
+instead: `~/.claude/skills/qa-appium-scripter/templates/`.
 
-  /**
-   * Runs `action` for every item, isolating each one, and returns the items that
-   * failed. One failure never stops the rest.
-   */
-  static async eachWarnOnFailure<T>(
-    items: readonly T[],
-    action: (item: T) => Promise<void>,
-    describe: (item: T) => string,
-  ): Promise<T[]> {
-    let failed: T[] = [];
-    for (let item of items) {
-      try {
-        await action(item);
-      } catch (error) {
-        failed.push(item);
-        console.warn(`[teardown] ${describe(item)} — failed, continuing: ${reasonFor(error)}`);
-      }
-    }
-    return failed;
-  }
-
-  /** Tries the primary action, falls back to a second one. For the teardown
-   *  ladder, where a lower rung exists. */
-  static async tryOrElse(primary: () => Promise<void>, fallback: () => Promise<void>): Promise<void> {
-    try {
-      await primary();
-    } catch {
-      await fallback();
-    }
-  }
-
-  /** Whether an action succeeded, without throwing either way. */
-  static async succeeded(action: () => Promise<void>): Promise<boolean> {
-    try {
-      await action();
-      return true;
-    } catch {
-      return false;
-    }
-  }
-}
-
-function reasonFor(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-```
+**Never rewrite, re-derive or "improve" either at scaffold time — the template
+IS the implementation.** A change belongs in the template file, so every project
+that scaffolds after it gets the fix. Each exists because its absence has
+already caused a defect.
 
 **`src/data/DataHelper.ts`** — realistic + unique test data. The split it
 enforces:

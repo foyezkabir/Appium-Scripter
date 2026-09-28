@@ -28,7 +28,8 @@ It does not stop between stages to ask whether it should continue.
 
 | File | What it is |
 |---|---|
-| `.claude/skills/qa-appium-scripter/SKILL.md` | the method — one self-contained file, the authority |
+| `.claude/skills/qa-appium-scripter/SKILL.md` | the method — the authority |
+| `.claude/templates/` | `DataHelper.ts` + `ErrorHelper.ts` — implementations copied verbatim, never re-derived |
 | `CLAUDE.md` | the rules, always loaded, skill or no skill |
 | `tools/gate.mjs` | verifies a module is actually finished |
 | `tools/stop-gate.mjs` | Stop hook — blocks ending a turn mid-module |
