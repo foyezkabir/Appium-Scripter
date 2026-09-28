@@ -1,4 +1,5 @@
 import type { ChainablePromiseElement } from 'webdriverio';
+import { StepRecorder } from 'testreportium';
 import { d } from '../support/driver';
 import { FRAMEWORK, TIMEOUT, isAndroid } from '../support/config';
 
@@ -123,14 +124,22 @@ export abstract class BasePage {
   }
 
   // ----------------------------------------------------------------- actions
+  //
+  // Every action is ONE StepRecorder step, so testreportium shows a timed step
+  // timeline per test. The step's first word sets its colour in the report
+  // (tap / fill / read / back). Recording never changes behaviour: the result
+  // is returned and a throw is re-thrown. Never nest one step inside another —
+  // the timeline is flat, so a nested step counts its time twice.
 
   async tap(
     el: ChainablePromiseElement,
     label: string,
     timeout: number = TIMEOUT.element,
   ): Promise<void> {
-    await this.waitVisible(el, label, timeout);
-    await el.click();
+    await StepRecorder.step(`tap ${label}`, async () => {
+      await this.waitVisible(el, label, timeout);
+      await el.click();
+    });
   }
 
   /**
@@ -149,15 +158,17 @@ export abstract class BasePage {
    * iOS and THROWS rather than degrading.
    */
   async fill(el: ChainablePromiseElement, value: string, label: string): Promise<void> {
-    await this.waitVisible(el, label);
-    await el.click();
-    await el.clearValue();
-    await el.setValue(value);
-    if (isAndroid && FRAMEWORK === 'rn') {
-      await d().keys(['x']);
-      await d().pressKeyCode(67); // KEYCODE_DEL
-    }
-    await this.hideKeyboard();
+    await StepRecorder.step(`fill ${label}`, async () => {
+      await this.waitVisible(el, label);
+      await el.click();
+      await el.clearValue();
+      await el.setValue(value);
+      if (isAndroid && FRAMEWORK === 'rn') {
+        await d().keys(['x']);
+        await d().pressKeyCode(67); // KEYCODE_DEL
+      }
+      await this.hideKeyboard();
+    });
   }
 
   /**
@@ -183,6 +194,10 @@ export abstract class BasePage {
    * NO back button at all, so it swipes from the left edge.
    */
   async goBack(): Promise<void> {
+    await StepRecorder.step('back', () => this.navigateBack());
+  }
+
+  private async navigateBack(): Promise<void> {
     if (isAndroid) {
       await d().pressKeyCode(4);
       return;
@@ -341,8 +356,10 @@ export abstract class BasePage {
     label: string,
     timeout: number = TIMEOUT.element,
   ): Promise<string> {
-    await this.waitVisible(el, label, timeout);
-    return (await el.getText()).trim();
+    return StepRecorder.step(`read ${label}`, async () => {
+      await this.waitVisible(el, label, timeout);
+      return (await el.getText()).trim();
+    });
   }
 
   /**

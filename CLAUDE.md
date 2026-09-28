@@ -301,6 +301,7 @@ npm test               # full suite, with a read-only device mirror
 npm run test:nomirror  # headless / CI
 npm run mirror         # hands-on device control (NEVER during a run)
 npm run verify         # typecheck + lint
+npm run report         # open the testreportium report of the last run
 ```
 
 ### Reports
@@ -310,7 +311,22 @@ Every run writes to `appium-reports/`:
 | File | For | Rule |
 |---|---|---|
 | `junit.xml` | `tools/gate.mjs` | **never remove or rename** — the gate parses it to decide whether stage 7 passed |
-| `failures/` | humans | screenshot + page source at the moment of failure, written by `jest.setup.ts` |
+| `report.html` | humans | **testreportium** — the ONE HTML report. Self-contained: screenshots embedded, run history, step timeline, device. Its path is printed as the last line of every run |
+| `failures/` | the report | screenshot + page source at the moment of failure, written by `jest.setup.ts`, named `<stamp>__<slug>` so the report pairs them to their test |
+| `steps.jsonl` | the report | one line per `BasePage` action; reset at the start of every run by `jest.global-setup.ts` |
+
+**One HTML report, never two.** Do not add `jest-html-reporters` or any other
+HTML reporter alongside testreportium.
+
+**Bootstrap wires the report in four places — all four, or it looks broken.**
+testreportium does not error on missing data, it silently drops that section:
+
+| Section | Needs |
+|---|---|
+| Environment | `recordSession(driver)` at the end of `startSession()` |
+| Step timeline | every `BasePage` action wrapped in one `StepRecorder.step('<verb> <label>', …)` — a new action gets one too |
+| Steps on the right test | `StepRecorder.setTest(currentTestName)` in a `beforeEach` in `jest.setup.ts` (cleared in `afterEach`) |
+| Quality Gates | `qualityGates` in the reporter's options in `jest.config.ts` |
 
 **A reporting failure must never fail a run.** Anything that writes a report
 wraps its write and warns; the tests already ran and `junit.xml` is what the

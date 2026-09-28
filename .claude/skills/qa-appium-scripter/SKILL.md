@@ -293,8 +293,16 @@ node -e "const f='package.json',p=require('./'+f);delete p.type;p.private=true;r
 
 npm install --save-dev \
   webdriverio @types/node 'typescript@~5.9' ts-node \
-  jest @types/jest ts-jest jest-junit dotenv @faker-js/faker
+  jest @types/jest ts-jest jest-junit dotenv @faker-js/faker testreportium
 ```
+
+`testreportium` is the suite's ONE human-readable report
+(`appium-reports/report.html`): self-contained, failure screenshots embedded,
+run history, a step timeline per test and the device it ran on. **Do not add a
+second HTML reporter** (`jest-html-reporters`, `jest-stare`…) — two reports of
+one run disagree in their details and nobody knows which to trust. It ships ESM
+only; this CommonJS suite loads it anyway because Jest runs with
+`--experimental-vm-modules` (verified on a device run, Node 25).
 
 `@faker-js/faker` backs `DataHelper` (Step 5a). It is a dependency of the data
 tier, not a convenience: a hardcoded "wrong password" or "unknown email" sent to
@@ -386,8 +394,8 @@ The four invariants are non-negotiable — see
 [Jest configuration invariants](#jest-configuration-invariants). Set
 `maxWorkers: 1`, `bail: 0`, `testTimeout: 240_000`,
 **`setupFilesAfterEnv: ['<rootDir>/jest.setup.ts']`** (not `…AfterEach` — Jest
-rejects the misspelling with `TS2561`), and a `jest-junit` reporter writing to
-`appium-reports/`.
+rejects the misspelling with `TS2561`), a `jest-junit` reporter writing to
+`appium-reports/`, and the `testreportium` reporter after it.
 
 Create `jest.config.ts`:
 
@@ -408,6 +416,8 @@ export default {
   // with no code change is a defect in the test.
 
   setupFilesAfterEnv: ['<rootDir>/jest.setup.ts'],
+  // Runs ONCE per run, before any test: resets the report's step log.
+  globalSetup: '<rootDir>/jest.global-setup.ts',
 
   reporters: [
     'default',
@@ -421,9 +431,42 @@ export default {
       classNameTemplate: '{classname}',
       titleTemplate: '{title}',
     }],
+
+    // Human-readable, and the ONLY HTML report. Self-contained: failure
+    // screenshots from appium-reports/failures/ are embedded, paired to their
+    // test by the `<stamp>__<slug>` file name jest.setup.ts writes.
+    ['testreportium/jest', {
+      outputDirectory: 'appium-reports',
+      filename: 'report.html',
+      projectName: '<App name>',
+      // The report's Quality Gates panel. A breach is SHOWN, it does not fail
+      // the run on its own — jest's exit code stays the verdict.
+      qualityGates: { maxFailures: 0, minPassRate: 95 },
+    }],
   ],
 };
 ```
+
+Create `jest.global-setup.ts`:
+
+```typescript
+import { rmSync } from 'node:fs';
+import { join } from 'node:path';
+
+/**
+ * Runs ONCE before the whole run. testreportium's StepRecorder only APPENDS to
+ * steps.jsonl and the report pairs steps to tests by name, so without this a
+ * previous run's steps show up again under the same test.
+ *
+ * No assertions (violation #7): a broken setup throws, it is not a result.
+ */
+export default async function globalSetup() {
+  rmSync(join('appium-reports', 'steps.jsonl'), { force: true });
+}
+```
+
+A project that later needs real global setup (provisioning a tenant, proving
+credentials) adds it to THIS function — keep the `rmSync` as its first line.
 
 Create `jest.setup.ts`. The three comments marked load-bearing below each mark
 a failure already paid for — keep them:
@@ -444,10 +487,13 @@ a failure already paid for — keep them:
 
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { StepRecorder } from 'testreportium';
 
 const OUT = join('appium-reports', 'failures');
 
-/** Filesystem-safe name from a test title. */
+/** Filesystem-safe name from a test title. MUST stay identical to
+ *  testreportium's own slug(): the report pairs each screenshot to its test by
+ *  this name, and a drift silently drops every image from the report. */
 const slug = (s: string) =>
   s.replace(/[^\w.-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 120);
 
@@ -521,6 +567,19 @@ function wrap(original: jest.It): jest.It {
 global.it = wrap(global.it);
 global.test = wrap(global.test);
 
+/**
+ * STEP PAIRING — tells testreportium which test each BasePage step belongs to.
+ *
+ * A beforeEach, NOT inside wrap(): registered here it runs BEFORE every other
+ * beforeEach (a fixture's, a login check's), so the steps those hooks take are
+ * filed under the test they prepare instead of the previous one. The name is
+ * Jest's full name (describe + title), which is what the report pairs on.
+ * Cleared after each test so afterAll teardown steps do not land on the last
+ * test.
+ */
+beforeEach(() => StepRecorder.setTest(expect.getState().currentTestName ?? ''));
+afterEach(() => StepRecorder.setTest(''));
+
 export {};
 ```
 
@@ -528,6 +587,19 @@ export {};
 **`tools/gate.mjs` parses it** to decide whether stage 7 passed — so it is
 never removed, and its `outputDirectory`/`outputName` never change without
 updating the gate.
+
+**The report is wired in four places, and each one is required.** Leave one
+out and the report does not error — it silently drops that section, and a
+clean run then looks like a broken report:
+
+| Report section | Comes from | Where |
+|---|---|---|
+| Environment (device, OS, Appium, UDID, automation) | `recordSession(driver)` | `startSession()` in `driver.ts` (Step 6 template) |
+| Step timeline per test | `StepRecorder.step()` around every action | `BasePage` actions (Step 7 template) |
+| …paired to the right test | `StepRecorder.setTest()` | the `beforeEach` in `jest.setup.ts` above |
+| …from THIS run only | `rmSync(steps.jsonl)` | `jest.global-setup.ts` above |
+| Failure screenshot | the `<stamp>__<slug>.png` file | `capture()` in `jest.setup.ts` above |
+| Quality Gates panel | `qualityGates` | the reporter options in `jest.config.ts` |
 
 **Failure capture is standing infrastructure, not a nicety.** On a real device
 you cannot see the screen when a test failed and the stack trace rarely says;
@@ -659,7 +731,8 @@ every branch reads, timeouts, and the `required()` guard that throws on a
 missing environment or tenant value instead of defaulting. `driver.ts` —
 `startSession()` (release UiAutomation → clock check → per-platform
 capabilities → `activateApp` → **prove** the app is frontmost), `d()`,
-`endSession()`.
+`endSession()`. `startSession()` ends with `recordSession(driver)`, which
+fills the report's Environment block — keep it; it never throws.
 
 **The foreground proof is per-platform on purpose.** `getCurrentPackage()` is
 Android-only and **throws** on iOS rather than degrading, so the iOS path uses
@@ -699,7 +772,7 @@ and **explicit waits only**. It provides:
 |---|---|
 | locators | `byA11y` · `byText` · `byTextContains` · `byId` · `editTextAt` |
 | waits | `waitVisible` · `waitGone` · `isVisible` · `waitForText` |
-| actions | `tap` · `fill` · `hideKeyboard` · `goBack` |
+| actions | `tap` · `fill` · `hideKeyboard` · `goBack` — each one a recorded report step |
 | scrolling | `scrollToText` · `scrollFieldIntoReach` · `scrollDown` · `scrollToTop` |
 | reading | `textOf` · `visibleTexts` · `a11yNames` |
 
@@ -708,6 +781,13 @@ and **explicit waits only**. It provides:
 [#4](#4-no-coordinate-swipes--ever) and
 [#5](#5-no-asserting-a-displayed-element-is-tappable). A `BasePage` without
 those two is the single biggest source of false failures in this stack.
+
+**A new action gets a `StepRecorder.step()` too.** Wrap its whole body in one
+step named `<verb> <label>` — the verb (`tap`, `fill`, `type`, `read`, `back`,
+`restart`, `scroll`…) sets the step's colour in the report. One step per
+action, never one nested inside another: the timeline is flat, so a nested step
+counts its time twice. A composite action (tap a field, then type) records its
+`tap()` plus one `type into <label>` step for the typing.
 
 **`BasePage` is the ONLY file that knows the platform.** Every per-OS branch
 lives here, behind a method whose name says the intent — so page objects,
@@ -805,7 +885,8 @@ manually built binary into `tools/`, which must never reach git.
   "mirror": "scrcpy --stay-awake --window-title 'Appium — MANUAL CONTROL'",
   "typecheck": "tsc --noEmit",
   "appium": "appium --address 127.0.0.1 --port 4723",
-  "preflight": "tools/preflight.sh"
+  "preflight": "tools/preflight.sh",
+  "report": "open appium-reports/report.html"
 }
 ```
 
@@ -868,11 +949,24 @@ trap cleanup EXIT
 # Run jest in the BACKGROUND and `wait` on it: bash defers a trap until a
 # FOREGROUND child returns, so with jest in front the cleanup would not run
 # until the whole suite finished — too late to matter on a Ctrl-C.
+REPORT="$PWD/appium-reports/report.html"
+MARKER=$(mktemp)   # run-start timestamp: only report a file THIS run wrote
 node --experimental-vm-modules node_modules/.bin/jest "${@:2}" &
 JEST_PID=$!
 wait "$JEST_PID"
 STATUS=$?
 cleanup
+
+# Last thing on screen: where the testreportium report is.
+echo
+if [ -f "$REPORT" ] && [ ! "$MARKER" -nt "$REPORT" ]; then   # same-second counts: bash 3.2 compares whole seconds
+  echo "  Test report: $REPORT"
+  echo "  Open it:     npm run report"
+else
+  echo "  No report was written by this run (expected $REPORT)."
+fi
+echo
+rm -f "$MARKER"
 exit "$STATUS"
 ```
 
@@ -891,6 +985,11 @@ Three details are load-bearing if you edit the script:
 - **`set -uo pipefail`, not `set -e`** — a failing test is the normal case;
   under `-e` the script exits before the trap and loses the exit code.
 - **The exit code must be jest's**, or CI stops seeing red runs.
+- **The report path is the LAST thing printed**, and only when this run wrote
+  the report — a crashed run says so instead of pointing at the previous
+  run's file. `! "$MARKER" -nt "$REPORT"` rather than `"$REPORT" -nt
+  "$MARKER"`: macOS bash 3.2 compares whole seconds, so a report written in
+  the second the run started would otherwise read as stale.
 - **A watchdog, not just traps.** Ctrl-C and `kill -9` never run a trap, so a
   polling watchdog reaps the mirror however the script dies. Verified against
   SIGTERM/SIGINT/SIGKILL — without it every Ctrl-C leaks a window over the
@@ -2133,6 +2232,10 @@ CJS build uses dynamic `import()` internally, which Jest's default VM blocks.
 
 **Screenshot on failure is standing infrastructure** (`jest.setup.ts` wraps the
 global `it`). Reports and screenshots go to `appium-reports/`, gitignored.
+
+**One HTML report: testreportium, at `appium-reports/report.html`.** Never add
+a second HTML reporter. `jest-junit` stays alongside it because the gate parses
+it — it is machine input, not a report anyone reads.
 
 ---
 

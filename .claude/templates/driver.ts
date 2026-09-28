@@ -1,4 +1,5 @@
 import { remote, type Browser } from 'webdriverio';
+import { recordSession } from 'testreportium';
 import { execFileSync } from 'node:child_process';
 import { APP_ACTIVITY, APP_ID, APPIUM, DEVICE, FRAMEWORK, TIMEOUT, isAndroid } from './config';
 
@@ -158,6 +159,10 @@ export async function startSession(): Promise<Browser> {
 
   await driver.activateApp(APP_ID);
   await assertAppIsForeground();
+  // Device, OS, Appium version, UDID, automation → the report's Environment
+  // block. After the foreground proof, so framework detection reads OUR app's
+  // tree. Never throws: a missing detail leaves that row out.
+  await recordSession(driver);
 
   return driver;
 }
