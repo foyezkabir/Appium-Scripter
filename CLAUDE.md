@@ -311,22 +311,33 @@ Every run writes to `appium-reports/`:
 | File | For | Rule |
 |---|---|---|
 | `junit.xml` | `tools/gate.mjs` | **never remove or rename** — the gate parses it to decide whether stage 7 passed |
-| `report.html` | humans | **testreportium** — the ONE HTML report. Self-contained: screenshots embedded, run history, step timeline, device. Its path is printed as the last line of every run |
-| `failures/` | the report | screenshot + page source at the moment of failure, written by `jest.setup.ts`, named `<stamp>__<slug>` so the report pairs them to their test |
+| `report.html` | humans | **testreportium** report, if picked. Self-contained: screenshots and recordings embedded, run history, step timeline, device, quality gates |
+| `jest-report.html` | humans | **jest-html-reporters** report, if picked, with the failure screenshot attached to each failed test |
+| `failures/` | the report | screenshot + page source (and screen recording) of each failed test, written by testreportium's `captureFailure()` / `finishRecording()` from `jest.setup.ts`, so the names always match what the report pairs on |
+| `quarantine.json` | your runner | tests flaky enough to set aside (`quarantine: true`); empty on a first run |
 | `steps.jsonl` | the report | one line per `BasePage` action; reset at the start of every run by `jest.global-setup.ts` |
 
-**One HTML report, never two.** Do not add `jest-html-reporters` or any other
-HTML reporter alongside testreportium.
+**The HTML report is the user's choice:** testreportium (the default),
+jest-html-reporters, or both — asked once at bootstrap, then read from the
+`reporters` in `jest.config.ts`. Never add a reporter they did not pick. The
+path of each report this run wrote is printed as the last line of every run.
+`testreportium` is installed in every case, because the templates' step,
+device and capture hooks live in it.
 
-**Bootstrap wires the report in four places — all four, or it looks broken.**
-testreportium does not error on missing data, it silently drops that section:
+For the testreportium report: **installing testreportium alone gives only pass/fail, errors, durations,
+diagnosis and history.** Everything below is recorded by the suite during the
+run, and bootstrap wires all of it. testreportium does not error on missing
+data; that section just comes up empty:
 
 | Section | Needs |
 |---|---|
 | Environment | `recordSession(driver)` at the end of `startSession()` |
 | Step timeline | every `BasePage` action wrapped in one `StepRecorder.step('<verb> <label>', …)` — a new action gets one too |
 | Steps on the right test | `StepRecorder.setTest(currentTestName)` in a `beforeEach` in `jest.setup.ts` (cleared in `afterEach`) |
-| Quality Gates | `qualityGates` in the reporter's options in `jest.config.ts` |
+| Failure screenshot, page source, Gallery | `captureFailure(driver, title)` in `jest.setup.ts`'s `wrap()` — never a hand-copied `slug()` |
+| Screen recording of a failed test | `recordTest()` / `finishRecording()` in the same `wrap()` |
+| Quality Gates | all five rules in `qualityGates` in the reporter's options in `jest.config.ts` (a rule left out shows *Not set*) |
+| `quarantine.json` | `quarantine: true` in the same options |
 
 **A reporting failure must never fail a run.** Anything that writes a report
 wraps its write and warns; the tests already ran and `junit.xml` is what the

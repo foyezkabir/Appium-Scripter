@@ -181,6 +181,31 @@ and building a native locator ladder for it wastes the whole session.
 Run once per project. **Every step is idempotent** — re-running is safe and
 self-skips. On an already-scaffolded project, verify and move on.
 
+### Step 0 — Which HTML report (ask once, before Step 2)
+
+The suite can write either report or both. **It is the user's choice — never
+impose one, and never add one they did not pick.** Ask:
+
+> Which HTML test report do you want — **testreportium** (device, step
+> timeline, failure screenshots and recordings, history, quality gates),
+> **jest-html-reporters** (the standard Jest HTML report), or **both**?
+
+No answer, or "you decide" → **testreportium**. On an existing project, read
+the `reporters` in `jest.config.ts` instead of asking again.
+
+| Choice | Reporters in `jest.config.ts` | Report files |
+|---|---|---|
+| **testreportium** (default) | `testreportium/jest` | `appium-reports/report.html` |
+| **jest-html-reporters** | `jest-html-reporters` | `appium-reports/jest-report.html` |
+| **both** | both | both files, side by side |
+
+**`testreportium` is installed in every case.** The templates' hooks live in it
+(`StepRecorder` in `BasePage`, `recordSession` in `driver.ts`,
+`captureFailure` in `jest.setup.ts`) and they cost nothing when its reporter is
+not in the config. It has no dependencies, and switching reports later is then
+a one-line change in `jest.config.ts`. `jest-junit` is also in every case —
+the gate parses it (Step 4).
+
 ### Step 1 — System toolchain (BEFORE any npm command)
 
 Appium is a JVM+SDK tool, not just an npm package: a missing `JAVA_HOME`
@@ -294,15 +319,21 @@ node -e "const f='package.json',p=require('./'+f);delete p.type;p.private=true;r
 npm install --save-dev \
   webdriverio @types/node 'typescript@~5.9' ts-node \
   jest @types/jest ts-jest jest-junit dotenv @faker-js/faker testreportium
+
+# ONLY when Step 0's answer is "jest-html-reporters" or "both":
+npm install --save-dev jest-html-reporters
 ```
 
-`testreportium` is the suite's ONE human-readable report
-(`appium-reports/report.html`): self-contained, failure screenshots embedded,
-run history, a step timeline per test and the device it ran on. **Do not add a
-second HTML reporter** (`jest-html-reporters`, `jest-stare`…) — two reports of
-one run disagree in their details and nobody knows which to trust. It ships ESM
-only; this CommonJS suite loads it anyway because Jest runs with
-`--experimental-vm-modules` (verified on a device run, Node 25).
+`testreportium` is always installed (Step 0 says why); whether its report is
+written is decided by `jest.config.ts` alone. Its report
+(`appium-reports/report.html`) is self-contained: failure screenshots and
+recordings embedded, run history, a step timeline per test and the device it
+ran on. It ships ESM only; this CommonJS suite loads it anyway because Jest
+runs with `--experimental-vm-modules` (verified on a device run, Node 25).
+
+**Add no HTML reporter the user did not pick in Step 0** (`jest-stare`, a
+second copy of either…). Two reports the user did not ask for disagree in
+their details and nobody knows which to trust.
 
 `@faker-js/faker` backs `DataHelper` (Step 5a). It is a dependency of the data
 tier, not a convenience: a hardcoded "wrong password" or "unknown email" sent to
@@ -432,16 +463,39 @@ export default {
       titleTemplate: '{title}',
     }],
 
-    // Human-readable, and the ONLY HTML report. Self-contained: failure
-    // screenshots from appium-reports/failures/ are embedded, paired to their
-    // test by the `<stamp>__<slug>` file name jest.setup.ts writes.
+    // ── HTML reports: keep the one(s) the user picked in Step 0, delete the
+    // other block. Both may stay; they write different files.
+
+    // testreportium — appium-reports/report.html. Self-contained: failure
+    // screenshots and recordings from appium-reports/failures/ are embedded,
+    // paired to their test by the file names captureFailure() writes.
     ['testreportium/jest', {
       outputDirectory: 'appium-reports',
       filename: 'report.html',
       projectName: '<App name>',
       // The report's Quality Gates panel. A breach is SHOWN, it does not fail
-      // the run on its own — jest's exit code stays the verdict.
-      qualityGates: { maxFailures: 0, minPassRate: 95 },
+      // the run on its own — jest's exit code stays the verdict. Set all five:
+      // a rule left out shows as "Not set" and never decides the gate.
+      qualityGates: {
+        maxFailures: 0,          // no test may fail
+        minPassRate: 95,         // at least 95% of tests pass
+        maxFlakyRate: 10,        // at most 10% of tests flaky
+        minStabilityGrade: 'B',  // suite grade B or better
+        noNewFailures: true,     // nothing that passed last run may fail now
+      },
+      // Writes appium-reports/quarantine.json: the tests flaky enough to set
+      // aside (from the 2nd run on; a first run writes an empty list).
+      quarantine: true,
+    }],
+
+    // jest-html-reporters — appium-reports/jest-report.html. jest.setup.ts
+    // attaches the failure screenshot to each failed test in it.
+    ['jest-html-reporters', {
+      publicPath: 'appium-reports',
+      filename: 'jest-report.html',
+      pageTitle: '<App name> · Appium report',
+      expand: true,
+      includeConsoleLog: true,
     }],
   ],
 };
@@ -476,84 +530,82 @@ a failure already paid for — keep them:
  * jest.setup.ts — standing infrastructure, loaded via setupFilesAfterEnv.
  *
  * On a physical device you cannot see what the screen looked like when a test
- * failed, and the stack trace rarely says. This captures a screenshot plus the
- * page source at the moment of failure, named after the test, into
- * appium-reports/failures/.
+ * failed, and the stack trace rarely says. This records the screen during each
+ * test and, on failure, keeps the video and captures a screenshot plus the
+ * page source into appium-reports/failures/, where testreportium embeds them.
  *
  * It wraps the global `it`/`test` rather than using an afterEach, because an
  * afterEach runs AFTER teardown has already navigated away — by then the
  * screen no longer shows the failure.
  */
 
-import { mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { StepRecorder } from 'testreportium';
+import { StepRecorder, captureFailure, recordTest, finishRecording } from 'testreportium';
 
-const OUT = join('appium-reports', 'failures');
+/** Screen recording of each test; kept only when the test fails. Android needs
+ *  nothing extra; iOS needs ffmpeg on the Appium machine. Set false to skip. */
+const RECORD = true;
 
-/** Filesystem-safe name from a test title. MUST stay identical to
- *  testreportium's own slug(): the report pairs each screenshot to its test by
- *  this name, and a drift silently drops every image from the report. */
-const slug = (s: string) =>
-  s.replace(/[^\w.-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 120);
+/** jest-html-reporters' helper, loaded by a NON-LITERAL name: a suite that did
+ *  not pick that report (Step 0) has no such package, and a literal import
+ *  would fail to compile. With it installed, the failure screenshot is
+ *  attached to the test in appium-reports/jest-report.html. */
+const JEST_HTML_HELPER = 'jest-html-reporters/helper';
 
-/** Only what this file needs — NOT ReturnType<typeof d>: if d()'s signature
- *  is `never` (it throws when there is no session) that collapses to `never`
- *  and every property access below becomes a compile error, failing the whole
+async function attachToJestReport(driver: Parameters<typeof captureFailure>[0]) {
+  try {
+    const { addAttach } = await import(JEST_HTML_HELPER);
+    const png = Buffer.from(await driver.takeScreenshot(), 'base64');
+    await addAttach({ attach: png, description: 'Screen at failure', bufferFormat: 'png' });
+  } catch {
+    return; // not installed, or no screen: never mask the real failure
+  }
+}
+
+/** The live session, or undefined when there is none (not an error). Imported
+ *  lazily: at module load the driver does not exist yet. Typed as the
+ *  testreportium helpers' own parameters — NOT ReturnType<typeof d>: if d()'s
+ *  signature is `never` (it throws when there is no session) that collapses to
+ *  `never` and every use below becomes a compile error, failing the whole
  *  suite before a single test runs. */
-type Capturable = {
-  takeScreenshot(): Promise<string>;
-  getPageSource(): Promise<string>;
-};
-
-async function capture(testName: string) {
-  // Imported lazily: at module load the driver does not exist yet.
-  let driver: Capturable;
+async function liveDriver() {
   try {
     const { d } = await import('./src/support/driver');
-    driver = d() as unknown as Capturable;
+    return d() as unknown as Parameters<typeof captureFailure>[0] & Parameters<typeof recordTest>[0];
   } catch {
-    return; // no live session — nothing to capture, and that is not an error
-  }
-
-  mkdirSync(OUT, { recursive: true });
-  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const base = join(OUT, `${stamp}__${slug(testName)}`);
-
-  // Each capture is independent: a failure to grab the screenshot must not
-  // prevent the page source, and neither must ever mask the real test failure.
-  try {
-    const png = await driver.takeScreenshot();
-    writeFileSync(`${base}.png`, Buffer.from(png, 'base64'));
-  } catch (e) {
-    console.warn(`[setup] screenshot failed: ${(e as Error).message}`);
-  }
-
-  try {
-    writeFileSync(`${base}.xml`, await driver.getPageSource());
-  } catch (e) {
-    console.warn(`[setup] page source failed: ${(e as Error).message}`);
+    return undefined;
   }
 }
 
 /**
  * Wrap the global test fn so a throwing body is captured, then RE-THROWN.
  * Swallowing here would turn every failure green — the exact thing violation
- * #3 exists to prevent.
+ * #3 exists to prevent. The testreportium helpers never throw, so a capture or
+ * recording problem can never fail or mask a test either.
  */
 function wrap(original: jest.It): jest.It {
   const wrapped = ((name: string, fn?: jest.ProvidesCallback, timeout?: number) => {
     if (!fn) return original(name, fn as never, timeout);
     const inner = async (...args: unknown[]) => {
+      const driver = await liveDriver();
+      const recording = RECORD && driver ? await recordTest(driver) : false;
       try {
         // `any` is deliberate: fn's signature varies (done-callback vs async).
         // NO eslint-disable here — the config loads the parser and no rule
         // presets, so @typescript-eslint/no-explicit-any does not exist and a
         // directive naming it makes ESLint itself error, reddening the gate on
         // a clean scaffold. Verified in a cold sandbox.
-        return await (fn as any)(...args);
+        const result = await (fn as any)(...args);
+        if (recording && driver) await finishRecording(driver, name, { keep: false });
+        return result;
       } catch (err) {
-        await capture(name);
+        // `name` is the test's own title — what testreportium pairs files on.
+        // Its captureFailure() names the files with the package's own slug(),
+        // so the report and the capture can never drift apart. Never hand-copy
+        // slug() here: a drift silently drops every image from the report.
+        const now = (await liveDriver()) ?? driver;
+        if (now) await captureFailure(now, name);
+        if (now) await attachToJestReport(now);
+        if (recording && now) await finishRecording(now, name, { keep: true });
         throw err; // ALWAYS re-throw
       }
     };
@@ -588,8 +640,15 @@ export {};
 never removed, and its `outputDirectory`/`outputName` never change without
 updating the gate.
 
-**The report is wired in four places, and each one is required.** Leave one
-out and the report does not error — it silently drops that section, and a
+**jest-html-reporters needs nothing beyond its reporter entry** and the
+screenshot `attachToJestReport()` adds. The rest of this section is about the
+testreportium report.
+
+**Installing testreportium alone gives pass/fail, errors, durations,
+diagnosis, history and trends — nothing else.** A reporter only sees what Jest
+hands it when the run ends; the driver session is gone by then. Every row
+below is recorded by the suite DURING the run, and each one is required. Leave
+one out and the report does not error — that section comes up empty, and a
 clean run then looks like a broken report:
 
 | Report section | Comes from | Where |
@@ -598,15 +657,24 @@ clean run then looks like a broken report:
 | Step timeline per test | `StepRecorder.step()` around every action | `BasePage` actions (Step 7 template) |
 | …paired to the right test | `StepRecorder.setTest()` | the `beforeEach` in `jest.setup.ts` above |
 | …from THIS run only | `rmSync(steps.jsonl)` | `jest.global-setup.ts` above |
-| Failure screenshot | the `<stamp>__<slug>.png` file | `capture()` in `jest.setup.ts` above |
-| Quality Gates panel | `qualityGates` | the reporter options in `jest.config.ts` |
+| Failure screenshot + page source, Gallery | `captureFailure(driver, title)` | `wrap()` in `jest.setup.ts` above |
+| Screen recording of a failed test | `recordTest()` / `finishRecording()` | `wrap()` in `jest.setup.ts` above |
+| Quality Gates panel, all five rules | `qualityGates` | the reporter options in `jest.config.ts` |
+| `quarantine.json` | `quarantine: true` | the reporter options in `jest.config.ts` |
 
 **Failure capture is standing infrastructure, not a nicety.** On a real device
 you cannot see the screen when a test failed and the stack trace rarely says;
 the setup file grabs a screenshot **and** the page source into
-`appium-reports/failures/<timestamp>__<test name>.{png,xml}`.
+`appium-reports/failures/<timestamp>__<test name>.{png,xml}`, plus the screen
+recording as `.mp4`. Passing tests keep no video.
 
-Three things about it are load-bearing:
+Four things about it are load-bearing:
+
+- **It uses the package's `captureFailure()`, never a hand-written capture.**
+  The report pairs each file to its test by `slug(title)`; `captureFailure()`
+  names files with that same function, so the two cannot drift. A copied
+  `slug()` that ever differs drops every screenshot from the report with no
+  error anywhere.
 
 - **It wraps the global `it`/`test`, not an `afterEach`.** An `afterEach` runs
   after teardown has navigated away — by then the screen no longer shows the
@@ -886,9 +954,14 @@ manually built binary into `tools/`, which must never reach git.
   "typecheck": "tsc --noEmit",
   "appium": "appium --address 127.0.0.1 --port 4723",
   "preflight": "tools/preflight.sh",
-  "report": "open appium-reports/report.html"
+  "report": "open appium-reports/report.html",
+  "report:jest": "open appium-reports/jest-report.html"
 }
 ```
+
+Keep only the `report` script(s) for the report(s) picked in Step 0. With
+jest-html-reporters alone, `report` opens `jest-report.html` and there is no
+`report:jest`.
 
 `--experimental-vm-modules` is **required** on every jest script: WebdriverIO
 v9's CJS build uses dynamic `import()` internally, which Jest's default VM
@@ -949,7 +1022,6 @@ trap cleanup EXIT
 # Run jest in the BACKGROUND and `wait` on it: bash defers a trap until a
 # FOREGROUND child returns, so with jest in front the cleanup would not run
 # until the whole suite finished — too late to matter on a Ctrl-C.
-REPORT="$PWD/appium-reports/report.html"
 MARKER=$(mktemp)   # run-start timestamp: only report a file THIS run wrote
 node --experimental-vm-modules node_modules/.bin/jest "${@:2}" &
 JEST_PID=$!
@@ -957,14 +1029,16 @@ wait "$JEST_PID"
 STATUS=$?
 cleanup
 
-# Last thing on screen: where the testreportium report is.
+# Last thing on screen: where the HTML report(s) are — whichever this run wrote.
 echo
-if [ -f "$REPORT" ] && [ ! "$MARKER" -nt "$REPORT" ]; then   # same-second counts: bash 3.2 compares whole seconds
-  echo "  Test report: $REPORT"
-  echo "  Open it:     npm run report"
-else
-  echo "  No report was written by this run (expected $REPORT)."
-fi
+WROTE=""
+for REPORT in "$PWD/appium-reports/report.html" "$PWD/appium-reports/jest-report.html"; do
+  if [ -f "$REPORT" ] && [ ! "$MARKER" -nt "$REPORT" ]; then   # same-second counts: bash 3.2 compares whole seconds
+    echo "  Test report: $REPORT"
+    WROTE=1
+  fi
+done
+[ -n "$WROTE" ] || echo "  No HTML report was written by this run (looked in appium-reports/)."
 echo
 rm -f "$MARKER"
 exit "$STATUS"
@@ -2233,9 +2307,11 @@ CJS build uses dynamic `import()` internally, which Jest's default VM blocks.
 **Screenshot on failure is standing infrastructure** (`jest.setup.ts` wraps the
 global `it`). Reports and screenshots go to `appium-reports/`, gitignored.
 
-**One HTML report: testreportium, at `appium-reports/report.html`.** Never add
-a second HTML reporter. `jest-junit` stays alongside it because the gate parses
-it — it is machine input, not a report anyone reads.
+**HTML reports are the user's choice (Phase 0, Step 0):** testreportium at
+`appium-reports/report.html`, jest-html-reporters at
+`appium-reports/jest-report.html`, or both. Never add one they did not pick.
+`jest-junit` stays in every case because the gate parses it — it is machine
+input, not a report anyone reads.
 
 ---
 

@@ -350,21 +350,41 @@ run proceeds unmirrored and you start QuickTime by hand.
 
 ### Reports
 
-Each run writes `appium-reports/junit.xml` — machine-readable, and **the gate
-parses it** to decide whether stage 7 passed, so it is never removed or
-renamed. Alongside it, `appium-reports/failures/` holds the device screenshot
-and view hierarchy captured at the moment of each failure.
+Each run writes to `appium-reports/`:
 
-Add any human-facing HTML reporter you like as an additional Jest reporter;
-`jest-junit` stays regardless, because the gate depends on it.
+- `junit.xml`: machine-readable, and **the gate parses it** to decide whether
+  stage 7 passed, so it is never removed or renamed.
+- the HTML report you picked at setup: testreportium, jest-html-reporters, or
+  both.
+  - `report.html` from [testreportium](https://www.npmjs.com/package/testreportium)
+    (the default): self-contained, with the device, a step timeline per test,
+    failure screenshots and recordings embedded, run history, all five quality
+    gates and the quarantine registry. `npm run report` opens it.
+  - `jest-report.html` from
+    [jest-html-reporters](https://www.npmjs.com/package/jest-html-reporters):
+    the standard Jest HTML report, with the failure screenshot attached to
+    each failed test.
+  To switch later, add or remove the reporter in `jest.config.ts`
+  (`npm install -D jest-html-reporters` first if you add that one).
+- `failures/`: the screenshot, view hierarchy and screen recording of each
+  failed test.
+- `quarantine.json`: the tests flaky enough to set aside.
+
+testreportium is installed in every case, because the step, device and
+capture hooks live in it. For its report, installing it alone only gives
+pass/fail, errors and history. The rest is recorded by the suite during the run, and bootstrap wires all of it:
+`recordSession()` in the driver, `StepRecorder` in `BasePage` and
+`jest.setup.ts`, `captureFailure()` and the screen recording in
+`jest.setup.ts`, and `qualityGates` plus `quarantine` in `jest.config.ts`.
 
 ### Failure capture
 
 `jest.setup.ts` wraps the global `it` — not an `afterEach`, which would run
-after teardown has already navigated away — and writes a screenshot plus the
-page source to `appium-reports/failures/` at the moment of failure. It always
-re-throws; a capture hook that swallowed the error would turn every failure
-green.
+after teardown has already navigated away. Each test is screen-recorded; on
+failure it keeps the video and saves a screenshot plus the page source with
+testreportium's `captureFailure()`, which names the files exactly as the report
+pairs them. It always re-throws; a capture hook that swallowed the error would
+turn every failure green.
 
 ---
 
