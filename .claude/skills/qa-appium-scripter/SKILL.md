@@ -122,24 +122,42 @@ idevice_id -l 2>/dev/null                              # libimobiledevice, if in
 - Nothing on either → the device is unplugged, locked, or USB debugging /
   trust is not granted. Say which check failed; do not proceed blind.
 
-**Step 2 — which UI framework** (run against the foreground app):
+**Step 2 — which UI framework. ALWAYS open the app first, then check.**
+
+Detection runs against the app itself, launched and on screen — never against
+"whatever happens to be in front". Both checks below are required; the file
+check alone is not a verdict.
 
 ```bash
-# [Android] identify the foreground package, then look inside the APK.
-PKG=$(adb shell dumpsys window | grep -m1 mCurrentFocus | sed 's/.* \([a-zA-Z0-9_.]*\)\/.*/\1/')
-APK=$(adb shell pm path "$PKG" | head -1 | cut -d: -f2 | tr -d '\r')
-adb shell "unzip -l $APK 2>/dev/null || true" | grep -iE 'libflutter|libreactnative|libhermes|index.android.bundle|libapp.so'
+# [Android] 1. Find the package by name (ask the user, or search), then OPEN it.
+adb shell pm list packages | grep -i '<app name>'            # e.g. empathika
+PKG=com.example.app
+adb shell monkey -p "$PKG" -c android.intent.category.LAUNCHER 1 >/dev/null
+adb shell dumpsys window | grep -m1 mCurrentFocus            # must name $PKG
+
+# 2. Check EVERY APK part. A Play-installed app is SPLIT: the JS bundle sits in
+#    base.apk, but native libraries (libflutter.so, libreactnative.so,
+#    libhermes.so) sit in split_config.<abi>.apk. Reading only base.apk
+#    (`pm path | head -1`) misses them — a Flutter app then looks "native".
+for APK in $(adb shell pm path "$PKG" | cut -d: -f2 | tr -d '\r'); do
+  echo "$(basename "$APK"): $(adb shell "unzip -l $APK 2>/dev/null" \
+    | grep -oiE 'libflutter\.so|libapp\.so|libreactnative[a-z_]*\.so|libhermes\.so|index\.android\.bundle|assets/public/index\.html|cordova\.js|capacitor' \
+    | sort -u | tr '\n' ' ')"
+done
 ```
 
-| Evidence | Framework |
+Measured 2026-09-29 on com.empathika.app.nurse: `base.apk` held only
+`index.android.bundle`; `libreactnative.so` was in `split_config.arm64_v8a.apk`.
+
+| Evidence (any APK part) | Framework |
 |---|---|
 | `libflutter.so` · `libapp.so` | **Flutter** |
 | `libreactnative*.so` · `libhermes.so` · `index.android.bundle` | **React Native** |
-| neither, and the tree is `android.widget.*` | **Native Android** |
-| the tree shows `android.webkit.WebView` covering the screen | **Hybrid** |
+| `assets/public/index.html` · `cordova.js` · Capacitor | **Hybrid** |
+| none of these, and the tree is `android.widget.*` | **Native Android** |
 
-The **view hierarchy is the tiebreaker, and it beats file evidence.** Dump it
-and read what the nodes actually are:
+**3. Dump the open app's view hierarchy — the tiebreaker, and it beats file
+evidence.** Read what the nodes actually are:
 
 - **Flutter** — the native tree is nearly empty: one `FlutterView` and little
   else. Widgets are painted, not real views. **This is decisive**, and it is
@@ -153,7 +171,7 @@ and read what the nodes actually are:
 
 Dump it with whichever is available: Appium MCP `appium_get_page_source`, or
 `adb shell uiautomator dump /sdcard/v.xml && adb shell cat /sdcard/v.xml`
-**[Android]**.
+**[Android]**. Dump a real screen, not the splash: wait for content first.
 
 **Report what you found and what it implies, then continue.** For example:
 *"Detected: Android, React Native (libhermes.so + testID content-descs).
