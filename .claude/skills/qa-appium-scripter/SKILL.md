@@ -435,6 +435,8 @@ Create `jest.config.ts`:
  * jest.config.ts — committed, so every clone runs with the same reporters.
  */
 
+import type { ReportOptions } from 'testreportium';
+
 export default {
   preset: 'ts-jest',
   testEnvironment: 'node',
@@ -486,7 +488,7 @@ export default {
       // Writes appium-reports/quarantine.json: the tests flaky enough to set
       // aside (from the 2nd run on; a first run writes an empty list).
       quarantine: true,
-    }],
+    } satisfies ReportOptions],
 
     // jest-html-reporters — appium-reports/jest-report.html. jest.setup.ts
     // attaches the failure screenshot to each failed test in it.
@@ -500,6 +502,17 @@ export default {
   ],
 };
 ```
+
+**The testreportium options are typed** (`satisfies ReportOptions`, testreportium
+0.2.1 or newer): the editor autocompletes every option and `npm run typecheck`
+fails on a misspelt rule or a wrong value — `maxFailure`, `minPassRate: '95'`,
+`minStabilityGrade: 'E'` — instead of that rule silently showing as *Not set*.
+Keep the `satisfies`, and never cast the options to `any` to silence it.
+**Check the installed version first** (`npm ls testreportium`): on 0.2.0 the
+type does not exist yet and the typecheck fails with *TS2305: Module
+'"testreportium"' has no exported member 'ReportOptions'*. There, leave out
+the `import type` line and the `satisfies ReportOptions`; the config works the
+same, just untyped.
 
 Create `jest.global-setup.ts`:
 
